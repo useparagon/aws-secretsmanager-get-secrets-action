@@ -32,10 +32,16 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.cleanVariable = exports.extractAliasAndSecretIdFromInput = exports.isSecretArn = exports.transformToValidEnvName = exports.isJSONString = exports.injectSecret = exports.getSecretValue = exports.getSecretsWithPrefix = exports.buildSecretsList = void 0;
+exports.validateOverwriteMode = exports.cleanVariable = exports.extractAliasAndSecretIdFromInput = exports.isSecretArn = exports.transformToValidEnvName = exports.isJSONString = exports.injectSecret = exports.getSecretValue = exports.getSecretsWithPrefix = exports.buildSecretsList = exports.OverwriteMode = void 0;
 const core = __importStar(require("@actions/core"));
 const client_secrets_manager_1 = require("@aws-sdk/client-secrets-manager");
 const constants_1 = require("./constants");
+var OverwriteMode;
+(function (OverwriteMode) {
+    OverwriteMode["ERROR"] = "error";
+    OverwriteMode["SILENT"] = "silent";
+    OverwriteMode["WARN"] = "warn";
+})(OverwriteMode = exports.OverwriteMode || (exports.OverwriteMode = {}));
 /**
  * Gets the unique list of all secrets to be requested
  *
@@ -145,34 +151,59 @@ exports.getSecretValue = getSecretValue;
  * Transforms and injects secret as a masked environmental variable
  *
  * @param secretName: Name of the secret
+ * @param secretAlias: Alias of the secret. If undefined, defaults to the `secretName`.
  * @param secretValue: Value to set for secret
- * @param parseJsonSecrets: Indicates whether to deserialize JSON secrets
+ * @param options: {@link Options}
  * @param tempEnvName: If parsing JSON secrets, contains the current name for the env variable
  */
-function injectSecret(secretName, secretValue, parseJsonSecrets, tempEnvName) {
+function injectSecret(secretName, secretAlias, secretValue, topLevel, options, tempEnvName) {
     let secretsToCleanup = [];
-    if (parseJsonSecrets && isJSONString(secretValue)) {
+    const { parseJsonSecrets, recurseJsonSecrets, overwriteMode } = options;
+    if (parseJsonSecrets && isJSONString(secretValue) && (recurseJsonSecrets || topLevel)) {
         // Recursively parses json secrets
         const secretMap = JSON.parse(secretValue);
         for (const k in secretMap) {
             const keyValue = typeof secretMap[k] === 'string' ? secretMap[k] : JSON.stringify(secretMap[k]);
             // Append the current key to the name of the env variable
-            const newEnvName = `${tempEnvName || transformToValidEnvName(secretName)}_${transformToValidEnvName(k)}`;
-            secretsToCleanup = [...secretsToCleanup, ...injectSecret(secretName, keyValue, parseJsonSecrets, newEnvName)];
+            const prefix = tempEnvName || (secretAlias && transformToValidEnvName(secretAlias)) || (secretAlias === undefined && transformToValidEnvName(secretName));
+            const envName = transformToValidEnvName(k);
+            const fullEnvName = prefix ? `${prefix}_${envName}` : envName;
+            secretsToCleanup = [...secretsToCleanup, ...injectSecret(secretName, secretAlias, keyValue, false, options, fullEnvName)];
         }
     }
     else {
-        const envName = tempEnvName ? transformToValidEnvName(tempEnvName) : transformToValidEnvName(secretName);
-        // Fail the action if this variable name is already in use, or is our cleanup name
-        if (process.env[envName] || envName === constants_1.CLEANUP_NAME) {
-            throw new Error(`The environment name '${envName}' is already in use. Please use an alias to ensure that each secret has a unique environment name`);
+        const envName = tempEnvName ? transformToValidEnvName(tempEnvName) : transformToValidEnvName(secretAlias || secretName);
+        // Fail the action if env var is our cleanup name
+        if (envName === constants_1.CLEANUP_NAME) {
+            throw new Error(`The environment name '${constants_1.CLEANUP_NAME}' cannot be overwritten.`);
+        }
+        // Check for overwriting
+        if (process.env[envName]) {
+            switch (overwriteMode) {
+                case OverwriteMode.ERROR:
+                    throw new Error(`The environment name '${envName}' is already in use. Please use an alias to ensure that each secret has a unique environment name.`);
+                case OverwriteMode.SILENT:
+                    break;
+                case OverwriteMode.WARN:
+                    core.warning(`The environment name '${envName}' is already in use. The value will be overwritten.`);
+            }
         }
         // Inject a single secret
-        core.setSecret(secretValue);
+        const isNumericValue = !isNaN(Number(secretValue));
+        const isPublicEnvVar = options.publicEnvVars.includes(envName);
+        const isPublicValue = options.publicValues.includes(secretValue);
+        const skipMasking = (options.publicNumerics && isNumericValue) || isPublicEnvVar || isPublicValue;
+        if (!skipMasking) {
+            core.setSecret(secretValue);
+        }
         // Export variable
         core.debug(`Injecting secret ${secretName} as environment variable '${envName}'.`);
         core.exportVariable(envName, secretValue);
         secretsToCleanup.push(envName);
+        // Aggregate values for output file later
+        if (options.outputFile) {
+            options.aggregate.set(envName, secretValue.replace(/\n/g, '\\n'));
+        }
     }
     return secretsToCleanup;
 }
@@ -233,7 +264,7 @@ function extractAliasAndSecretIdFromInput(input) {
         return [alias, secretId];
     }
     // No alias
-    return ['', input.trim()];
+    return [undefined, input.trim()];
 }
 exports.extractAliasAndSecretIdFromInput = extractAliasAndSecretIdFromInput;
 /*
@@ -244,3 +275,17 @@ function cleanVariable(variableName) {
     delete process.env[variableName];
 }
 exports.cleanVariable = cleanVariable;
+function validateOverwriteMode(overwriteMode) {
+    switch (overwriteMode) {
+        case '':
+        case OverwriteMode.ERROR:
+            return OverwriteMode.ERROR;
+        case OverwriteMode.SILENT:
+            return OverwriteMode.SILENT;
+        case OverwriteMode.WARN:
+            return OverwriteMode.WARN;
+        default:
+            throw new Error(`Invalid overwrite mode '${overwriteMode}'.`);
+    }
+}
+exports.validateOverwriteMode = validateOverwriteMode;

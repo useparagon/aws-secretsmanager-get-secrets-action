@@ -14,7 +14,10 @@ import {
     injectSecret,
     isSecretArn,
     extractAliasAndSecretIdFromInput,
-    transformToValidEnvName
+    transformToValidEnvName,
+    validateOverwriteMode,
+    OverwriteMode,
+    Options
 } from "../src/utils";
 
 import { CLEANUP_NAME, LIST_SECRETS_MAX_RESULTS } from "../src/constants";
@@ -23,7 +26,7 @@ const TEST_NAME = 'test/secret';
 const TEST_ENV_NAME = 'TEST_SECRET';
 const TEST_VALUE = 'test!secret!value!';
 const SIMPLE_JSON_SECRET = '{"api_key": "testkey", "user": "testuser"}';
-const NESTED_JSON_SECRET = '{"host":"127.0.0.1", "port": "3600", "config":{"db_user":"testuser","db_password":"testpw","options":{"a":"YES","b":"NO", "c": 100 }}}';
+const NESTED_JSON_SECRET = '{"host":"127.0.0.1", "port": "3600", "config":{"db_user":"testuser","db_password":"testpw","options":{"a":"YES","b":"NO","c":100}}}';
 
 const VALID_ARN_1 = 'arn:aws:secretsmanager:us-east-1:123456789000:secret:test1-aBcdef';
 const TEST_NAME_1 = 'test/secret1';
@@ -31,16 +34,14 @@ const TEST_NAME_1 = 'test/secret1';
 const VALID_ARN_2 = 'arn:aws:secretsmanager:ap-south-1:123456789000:secret:test2-aBcdef';
 const TEST_NAME_2 = 'test/secret2';
 
-const NOT_MATCHING_ARN_3 = 'arn:aws:secretsmanager:us-east-1:123456789000:secret:alternativeSecret-aBcdef';
-const NOT_MATCHING_TEST = 'alternativeSecret';
-
 const INVALID_ARN = 'aws:secretsmanager:us-east-1:123456789000:secret:test3-aBcdef';
+
+const DEFAULT_OPTIONS: Options = { parseJsonSecrets: false, recurseJsonSecrets: false, overwriteMode: OverwriteMode.ERROR, publicEnvVars: [], publicNumerics: false, publicValues: [], outputFile: '', aggregate: new Map<string, string>() };
 
 jest.mock('@actions/core');
 
 const smClient = new SecretsManagerClient({}); // Cannot send mock directly because of type enforcement
 const smMockClient = mockClient(smClient);
-
 
 describe('Test secret value retrieval', () => {
     beforeEach(() => {
@@ -87,7 +88,7 @@ describe('Test secret value retrieval', () => {
     });
 
     test('Throws an error if unable to retrieve the secret', async () => {
-        const error = new ResourceNotFoundException({$metadata: {} as any, Message: 'Error'});
+        const error = new ResourceNotFoundException({ $metadata: {} as any, Message: 'Error' });
         smMockClient.on(GetSecretValueCommand).rejects(error);
         await expect(getSecretValue(smClient, TEST_NAME)).rejects.toThrow(error);
     });
@@ -177,7 +178,7 @@ describe('Test secret value retrieval', () => {
     });
 
     test('Throws an error if a prefix filter returns too many results', async () => {
-        let input = ["too/many/matches/*"];
+        const input = ["too/many/matches/*"];
         const expectedParams = {
             Filters: [
                 {
@@ -210,7 +211,7 @@ describe('Test secret value retrieval', () => {
     });
 
     test('Throws an error if a prefix filter has no results', async () => {
-        let input = ["no/matches/*"];
+        const input = ["no/matches/*"];
         const expectedParams = {
             Filters: [
                 {
@@ -233,7 +234,7 @@ describe('Test secret value retrieval', () => {
     });
 
     test('Throws an error if a prefix filter with an alias returns more than 1 result', async () => {
-        let input = ["SECRET_ALIAS,test/*"];
+        const input = ["SECRET_ALIAS,test/*"];
         const expectedParams = {
             Filters: [
                 {
@@ -288,32 +289,38 @@ describe('Test secret parsing and handling', () => {
     * Test: injectSecret()
     */
     test('Stores a simple secret', () => {
-        injectSecret(TEST_NAME, TEST_VALUE, false);
+        injectSecret(TEST_NAME, undefined, TEST_VALUE, true, { parseJsonSecrets: false, recurseJsonSecrets: false, overwriteMode: OverwriteMode.ERROR, publicEnvVars: [], publicNumerics: false, publicValues: [], outputFile: '', aggregate: new Map<string, string>() });
         expect(core.exportVariable).toHaveBeenCalledTimes(1);
         expect(core.exportVariable).toHaveBeenCalledWith(TEST_ENV_NAME, TEST_VALUE);
     });
 
+    test('Stores a simple secret with alias', () => {
+        injectSecret(TEST_NAME, 'ALIAS_1', TEST_VALUE, true, DEFAULT_OPTIONS);
+        expect(core.exportVariable).toHaveBeenCalledTimes(1);
+        expect(core.exportVariable).toHaveBeenCalledWith('ALIAS_1', TEST_VALUE);
+    });
+
     test('Stores a JSON secret as string when parseJson is false', () => {
-        injectSecret(TEST_NAME, SIMPLE_JSON_SECRET, false);
+        injectSecret(TEST_NAME, undefined, SIMPLE_JSON_SECRET, true, DEFAULT_OPTIONS);
         expect(core.exportVariable).toHaveBeenCalledTimes(1);
         expect(core.exportVariable).toHaveBeenCalledWith(TEST_ENV_NAME, SIMPLE_JSON_SECRET);
     });
 
     test('Throws an error if reserved name is used', () => {
         expect(() => {
-            injectSecret(CLEANUP_NAME, TEST_VALUE, false);
+            injectSecret(CLEANUP_NAME, undefined, TEST_VALUE, true, DEFAULT_OPTIONS);
         }).toThrow();
     });
 
     test('Stores a variable for each JSON key value when parseJson is true', () => {
-        injectSecret(TEST_NAME, SIMPLE_JSON_SECRET, true);
+        injectSecret(TEST_NAME, undefined, SIMPLE_JSON_SECRET, true, { ...DEFAULT_OPTIONS, parseJsonSecrets: true });
         expect(core.exportVariable).toHaveBeenCalledTimes(2);
         expect(core.exportVariable).toHaveBeenCalledWith('TEST_SECRET_API_KEY', 'testkey');
         expect(core.exportVariable).toHaveBeenCalledWith('TEST_SECRET_USER', 'testuser');
     });
 
-    test('Stores a variable for nested JSON key values when parseJson is true', () => {
-        injectSecret(TEST_NAME, NESTED_JSON_SECRET, true);
+    test('Stores a variable for nested JSON key values when parseJson and recurseJson are true', () => {
+        injectSecret(TEST_NAME, undefined, NESTED_JSON_SECRET, true, { ...DEFAULT_OPTIONS, parseJsonSecrets: true, recurseJsonSecrets: true });
         expect(core.setSecret).toHaveBeenCalledTimes(7);
         expect(core.exportVariable).toHaveBeenCalledWith('TEST_SECRET_HOST', '127.0.0.1');
         expect(core.exportVariable).toHaveBeenCalledWith('TEST_SECRET_PORT', '3600');
@@ -322,6 +329,14 @@ describe('Test secret parsing and handling', () => {
         expect(core.exportVariable).toHaveBeenCalledWith('TEST_SECRET_CONFIG_OPTIONS_A', 'YES');
         expect(core.exportVariable).toHaveBeenCalledWith('TEST_SECRET_CONFIG_OPTIONS_B', 'NO');
         expect(core.exportVariable).toHaveBeenCalledWith('TEST_SECRET_CONFIG_OPTIONS_C', '100');
+    });
+
+    test('Stores a variable for top level JSON key values when parseJson is true and recurseJson is false', () => {
+        injectSecret(TEST_NAME, undefined, NESTED_JSON_SECRET, true, { ...DEFAULT_OPTIONS, parseJsonSecrets: true });
+        expect(core.setSecret).toHaveBeenCalledTimes(3);
+        expect(core.exportVariable).toHaveBeenCalledWith('TEST_SECRET_HOST', '127.0.0.1');
+        expect(core.exportVariable).toHaveBeenCalledWith('TEST_SECRET_PORT', '3600');
+        expect(core.exportVariable).toHaveBeenCalledWith('TEST_SECRET_CONFIG', '{"db_user":"testuser","db_password":"testpw","options":{"a":"YES","b":"NO","c":100}}');
     });
 
     /* 
@@ -333,9 +348,14 @@ describe('Test secret parsing and handling', () => {
         expect(extractAliasAndSecretIdFromInput(`ARN_ALIAS,${VALID_ARN_1}`)).toEqual(['ARN_ALIAS', VALID_ARN_1]);
     });
 
-    test('Returns blank for alias if none is provided', () => {
-        expect(extractAliasAndSecretIdFromInput("test/secret")).toEqual(['', 'test/secret']);
-        expect(extractAliasAndSecretIdFromInput(VALID_ARN_1)).toEqual(['', VALID_ARN_1]);
+    test('Returns undefined for alias if none is provided', () => {
+        expect(extractAliasAndSecretIdFromInput("test/secret")).toEqual([undefined, 'test/secret']);
+        expect(extractAliasAndSecretIdFromInput(VALID_ARN_1)).toEqual([undefined, VALID_ARN_1]);
+    });
+
+    test('Returns blank for alias if empty string is provided', () => {
+        expect(extractAliasAndSecretIdFromInput(",test/secret")).toEqual(['', 'test/secret']);
+        expect(extractAliasAndSecretIdFromInput(`,${VALID_ARN_1}`)).toEqual(['', VALID_ARN_1]);
     });
 
     test('Throws an error if the provided alias cannot be used as the environment name', () => {
@@ -398,3 +418,21 @@ describe('Test secret parsing and handling', () => {
         expect(isJSONString('{ "a": "yes", "options": { "opt_a": "yes", "opt_b": "no"} }')).toBe(true)
     });
 });
+
+describe('#validateOverwriteMode', () => {
+    test('Defaults to ERROR', () => {
+        expect(validateOverwriteMode('')).toBe(OverwriteMode.ERROR);
+    })
+
+    test('Returns valid values', () => {
+        expect(validateOverwriteMode('error')).toBe(OverwriteMode.ERROR);
+        expect(validateOverwriteMode('silent')).toBe(OverwriteMode.SILENT);
+        expect(validateOverwriteMode('warn')).toBe(OverwriteMode.WARN);
+    })
+
+    test('Throws error when value is invalid', () => {
+        expect(() => {
+            validateOverwriteMode('invalid')
+        }).toThrowError("Invalid overwrite mode 'invalid'.")
+    })
+})

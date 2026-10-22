@@ -43,22 +43,55 @@ To use the action, add a step to your workflow that uses the following syntax.
 ### Parameters
 - `secret-ids`: Secret ARNS, names, and name prefixes. 
 
-By default, the step creates each environment variable name from the secret name, transformed to include only uppercase letters, numbers, and underscores, and so that it doesn't begin with a number. 
+  By default, the step creates each environment variable name from the secret name, transformed to include only uppercase letters, numbers, and underscores, and so that it doesn't begin with a number.
 
-To set the environment variable name, enter it before the secret ID, followed by a comma. For example `ENV_VAR_1, secretId` creates an environment variable named **ENV_VAR_1** from the secret `secretId`. 
+  To set the environment variable name, enter it before the secret ID, followed by a comma. For example `ENV_VAR_1, secretId` creates an environment variable named **ENV_VAR_1** from the secret `secretId`.
 
-The environment variable name can consist of uppercase letters, numbers, and underscores.  
+  The environment variable name can consist of uppercase letters, numbers, and underscores.
 
-To use a prefix, enter at least three characters followed by an asterisk. For example `dev*` matches all secrets with a name beginning in **dev**. The maximum number of matching secrets that can be retrieved is 100. If you set the variable name, and the prefix matches multiple secrets, then the action fails.
-​
+  To use a prefix, enter at least three characters followed by an asterisk. For example `dev*` matches all secrets with a name beginning in **dev**. The maximum number of matching secrets that can be retrieved is 100. If you set the variable name, and the prefix matches multiple secrets, then the action fails.
+
+- `overwrite-mode`​
+
+  (Optional - default `error`) By default, the action prevents overwriting secrets.
+
+  The following modes are supported:
+  - `error` - Error when a secret is already set.
+  - `warn` - Warn when a secret is overwritten.
+  - `silent` - Allow for secrets to be overwritten silently.​
+
 - `parse-json-secrets`
 
-(Optional - default false) By default, the action sets the environment variable value to the entire JSON string in the secret value. 
+  (Optional - default `false`) By default, the action sets the environment variable value to the entire JSON string in the secret value.
 
-Set `parse-json-secrets` to `true` to create environment variables for each key/value pair in the JSON.
+  Set `parse-json-secrets` to `true` to create environment variables for each key/value pair in the JSON.
 
-Note that if the JSON uses case-sensitive keys such as "name" and "Name", the action will have duplicate name conflicts. In this case, set `parse-json-secrets` to `false` and parse the JSON secret value separately. 
-​
+  Note that if the JSON uses case-sensitive keys such as "name" and "Name", the action will have duplicate name conflicts. In this case, set `parse-json-secrets` to `false` and parse the JSON secret value separately.
+
+- `recurse-json-secrets`
+
+  (Optional - default `false`) If true, JSON secrets will be deserialized recursively instead of just at the top level. Since AWS Secrets Manager can store sets of secrets as JSON this will allow parsing those without also then parsing possible JSON strings within those child values.
+
+- `public-env-vars`
+
+  (Optional) Treat specific secrets as standard environment variables (unmasked).
+
+  The value of this option should be a list of environment variable names as ultimately resolved.
+
+- `public-numerics`
+
+  (Optional - default `false`) Treat numeric secrets as standard environment variables (unmasked).
+
+  Set `public-numerics` to `true` to prevent numeric values from being masked.
+
+- `public-values`
+
+  (Optional) Treat specific values as standard environment variables (unmasked).
+
+- `output-file`
+
+  (Optional) Path to file that will be populated with all `KEY=VALUE` pairs. This is in addition to injecting in environment.
+
 ### Examples
 ​
 **Example 1: Get secrets by name and by ARN**  
@@ -136,6 +169,51 @@ TEST_SECRET_API_USER: "user"
 TEST_SECRET_API_KEY: "key"
 TEST_SECRET_CONFIG_ACTIVE: "true"
 ```
+
+
+**Example 4: Parsed JSON in secret with custom prefix**
+
+The following example creates environment variables by parsing the JSON in the secret and prefixes them based on provided prefix.
+​
+```
+- name: Get Secrets by Name and by ARN
+  uses: aws-actions/aws-secretsmanager-get-secrets@v1
+  with:
+    secret-ids: |
+      CUSTOM,test/secret
+    parse-json-secrets: true
+```
+
+The secret `test/secret` has the following secret value.
+​
+```
+{
+  "api_user": "user",
+  "api_key": "key",
+  "config": {
+    "active": "true"
+  }
+}
+```
+
+Environment variables created:
+​
+```
+CUSTOM_API_USER: "user"
+CUSTOM_API_KEY: "key"
+CUSTOM_CONFIG_ACTIVE: "true"
+```
+
+> **Pro-tip**: It's possible remove prefixes by providing an "empty" prefix:
+>
+> ```
+> - name: Get Secrets by Name and by ARN
+>   uses: aws-actions/aws-secretsmanager-get-secrets@v1
+>   with:
+>     secret-ids: |
+>       ,test/secret
+>     parse-json-secrets: true
+> ```
 
 ## Security
 

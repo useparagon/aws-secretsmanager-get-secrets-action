@@ -19142,6 +19142,7 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.run = void 0;
 const core = __importStar(__nccwpck_require__(2186));
+const fs = __importStar(__nccwpck_require__(7147));
 const client_secrets_manager_1 = __nccwpck_require__(9600);
 const utils_1 = __nccwpck_require__(1314);
 const constants_1 = __nccwpck_require__(9042);
@@ -19151,13 +19152,24 @@ function run() {
             // Default client region is set by configure-aws-credentials
             const client = new client_secrets_manager_1.SecretsManagerClient({ region: process.env.AWS_DEFAULT_REGION, customUserAgent: "github-action" });
             const secretConfigInputs = [...new Set(core.getMultilineInput('secret-ids'))];
+            const overwriteMode = (0, utils_1.validateOverwriteMode)(core.getInput('overwrite-mode'));
             const parseJsonSecrets = core.getBooleanInput('parse-json-secrets');
+            const recurseJsonSecrets = core.getBooleanInput('recurse-json-secrets');
+            const publicEnvVars = [...new Set(core.getMultilineInput('public-env-vars'))];
+            const publicNumerics = core.getBooleanInput('public-numerics');
+            const publicValues = [...new Set(core.getMultilineInput('public-values'))];
+            const outputFile = core.getInput('output-file');
             // Get final list of secrets to request
             core.info('Building secrets list...');
             const secretIds = yield (0, utils_1.buildSecretsList)(client, secretConfigInputs);
             // Keep track of secret names that will need to be cleaned from the environment
             let secretsToCleanup = [];
             core.info('Your secret names may be transformed in order to be valid environment variables (see README). Enable Debug logging in order to view the new environment names.');
+            // Clear existing file
+            if (outputFile && fs.existsSync(outputFile)) {
+                fs.truncateSync(outputFile, 0);
+            }
+            const aggregate = new Map();
             // Get and inject secret values
             for (let secretId of secretIds) {
                 //  Optionally let user set an alias, i.e. `ENV_NAME,secret_name`
@@ -19167,16 +19179,30 @@ function run() {
                 const isArn = (0, utils_1.isSecretArn)(secretId);
                 try {
                     const secretValueResponse = yield (0, utils_1.getSecretValue)(client, secretId);
-                    if (!secretAlias) {
-                        secretAlias = isArn ? secretValueResponse.name : secretId;
-                    }
-                    const injectedSecrets = (0, utils_1.injectSecret)(secretAlias, secretValueResponse.secretValue, parseJsonSecrets);
+                    const secretName = isArn ? secretValueResponse.name : secretId;
+                    const injectedSecrets = (0, utils_1.injectSecret)(secretName, secretAlias, secretValueResponse.secretValue, true, {
+                        overwriteMode,
+                        parseJsonSecrets,
+                        recurseJsonSecrets,
+                        publicEnvVars,
+                        publicNumerics,
+                        publicValues,
+                        outputFile,
+                        aggregate
+                    });
                     secretsToCleanup = [...secretsToCleanup, ...injectedSecrets];
                 }
                 catch (err) {
                     // Fail action for any error
-                    core.setFailed(`Failed to fetch secret: '${secretId}'. Error: ${err}.`);
+                    core.setFailed(`Failed to fetch secret: '${secretId}'. Reason: ${err}`);
                 }
+            }
+            // Write output file
+            if (outputFile && aggregate.size > 0) {
+                const sorted = Array.from(aggregate.entries()).sort(([key1], [key2]) => key1.localeCompare(key2));
+                sorted.forEach(([key, value]) => {
+                    fs.appendFileSync(outputFile, `${key}=${value}\n`);
+                });
             }
             // Export the names of variables to clean up after completion
             core.exportVariable(constants_1.CLEANUP_NAME, JSON.stringify(secretsToCleanup));
@@ -19232,10 +19258,16 @@ var __awaiter = (this && this.__awaiter) || function (thisArg, _arguments, P, ge
     });
 };
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.cleanVariable = exports.extractAliasAndSecretIdFromInput = exports.isSecretArn = exports.transformToValidEnvName = exports.isJSONString = exports.injectSecret = exports.getSecretValue = exports.getSecretsWithPrefix = exports.buildSecretsList = void 0;
+exports.validateOverwriteMode = exports.cleanVariable = exports.extractAliasAndSecretIdFromInput = exports.isSecretArn = exports.transformToValidEnvName = exports.isJSONString = exports.injectSecret = exports.getSecretValue = exports.getSecretsWithPrefix = exports.buildSecretsList = exports.OverwriteMode = void 0;
 const core = __importStar(__nccwpck_require__(2186));
 const client_secrets_manager_1 = __nccwpck_require__(9600);
 const constants_1 = __nccwpck_require__(9042);
+var OverwriteMode;
+(function (OverwriteMode) {
+    OverwriteMode["ERROR"] = "error";
+    OverwriteMode["SILENT"] = "silent";
+    OverwriteMode["WARN"] = "warn";
+})(OverwriteMode = exports.OverwriteMode || (exports.OverwriteMode = {}));
 /**
  * Gets the unique list of all secrets to be requested
  *
@@ -19345,34 +19377,59 @@ exports.getSecretValue = getSecretValue;
  * Transforms and injects secret as a masked environmental variable
  *
  * @param secretName: Name of the secret
+ * @param secretAlias: Alias of the secret. If undefined, defaults to the `secretName`.
  * @param secretValue: Value to set for secret
- * @param parseJsonSecrets: Indicates whether to deserialize JSON secrets
+ * @param options: {@link Options}
  * @param tempEnvName: If parsing JSON secrets, contains the current name for the env variable
  */
-function injectSecret(secretName, secretValue, parseJsonSecrets, tempEnvName) {
+function injectSecret(secretName, secretAlias, secretValue, topLevel, options, tempEnvName) {
     let secretsToCleanup = [];
-    if (parseJsonSecrets && isJSONString(secretValue)) {
+    const { parseJsonSecrets, recurseJsonSecrets, overwriteMode } = options;
+    if (parseJsonSecrets && isJSONString(secretValue) && (recurseJsonSecrets || topLevel)) {
         // Recursively parses json secrets
         const secretMap = JSON.parse(secretValue);
         for (const k in secretMap) {
             const keyValue = typeof secretMap[k] === 'string' ? secretMap[k] : JSON.stringify(secretMap[k]);
             // Append the current key to the name of the env variable
-            const newEnvName = `${tempEnvName || transformToValidEnvName(secretName)}_${transformToValidEnvName(k)}`;
-            secretsToCleanup = [...secretsToCleanup, ...injectSecret(secretName, keyValue, parseJsonSecrets, newEnvName)];
+            const prefix = tempEnvName || (secretAlias && transformToValidEnvName(secretAlias)) || (secretAlias === undefined && transformToValidEnvName(secretName));
+            const envName = transformToValidEnvName(k);
+            const fullEnvName = prefix ? `${prefix}_${envName}` : envName;
+            secretsToCleanup = [...secretsToCleanup, ...injectSecret(secretName, secretAlias, keyValue, false, options, fullEnvName)];
         }
     }
     else {
-        const envName = tempEnvName ? transformToValidEnvName(tempEnvName) : transformToValidEnvName(secretName);
-        // Fail the action if this variable name is already in use, or is our cleanup name
-        if (process.env[envName] || envName === constants_1.CLEANUP_NAME) {
-            throw new Error(`The environment name '${envName}' is already in use. Please use an alias to ensure that each secret has a unique environment name`);
+        const envName = tempEnvName ? transformToValidEnvName(tempEnvName) : transformToValidEnvName(secretAlias || secretName);
+        // Fail the action if env var is our cleanup name
+        if (envName === constants_1.CLEANUP_NAME) {
+            throw new Error(`The environment name '${constants_1.CLEANUP_NAME}' cannot be overwritten.`);
+        }
+        // Check for overwriting
+        if (process.env[envName]) {
+            switch (overwriteMode) {
+                case OverwriteMode.ERROR:
+                    throw new Error(`The environment name '${envName}' is already in use. Please use an alias to ensure that each secret has a unique environment name.`);
+                case OverwriteMode.SILENT:
+                    break;
+                case OverwriteMode.WARN:
+                    core.warning(`The environment name '${envName}' is already in use. The value will be overwritten.`);
+            }
         }
         // Inject a single secret
-        core.setSecret(secretValue);
+        const isNumericValue = !isNaN(Number(secretValue));
+        const isPublicEnvVar = options.publicEnvVars.includes(envName);
+        const isPublicValue = options.publicValues.includes(secretValue);
+        const skipMasking = (options.publicNumerics && isNumericValue) || isPublicEnvVar || isPublicValue;
+        if (!skipMasking) {
+            core.setSecret(secretValue);
+        }
         // Export variable
         core.debug(`Injecting secret ${secretName} as environment variable '${envName}'.`);
         core.exportVariable(envName, secretValue);
         secretsToCleanup.push(envName);
+        // Aggregate values for output file later
+        if (options.outputFile) {
+            options.aggregate.set(envName, secretValue.replace(/\n/g, '\\n'));
+        }
     }
     return secretsToCleanup;
 }
@@ -19433,7 +19490,7 @@ function extractAliasAndSecretIdFromInput(input) {
         return [alias, secretId];
     }
     // No alias
-    return ['', input.trim()];
+    return [undefined, input.trim()];
 }
 exports.extractAliasAndSecretIdFromInput = extractAliasAndSecretIdFromInput;
 /*
@@ -19444,6 +19501,20 @@ function cleanVariable(variableName) {
     delete process.env[variableName];
 }
 exports.cleanVariable = cleanVariable;
+function validateOverwriteMode(overwriteMode) {
+    switch (overwriteMode) {
+        case '':
+        case OverwriteMode.ERROR:
+            return OverwriteMode.ERROR;
+        case OverwriteMode.SILENT:
+            return OverwriteMode.SILENT;
+        case OverwriteMode.WARN:
+            return OverwriteMode.WARN;
+        default:
+            throw new Error(`Invalid overwrite mode '${overwriteMode}'.`);
+    }
+}
+exports.validateOverwriteMode = validateOverwriteMode;
 
 
 /***/ }),
